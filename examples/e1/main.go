@@ -38,8 +38,6 @@ func run() error {
 		return errors.Wrap(err, "failed to subscribe")
 	}
 
-	fmt.Println(url)
-
 	qr := tqr.New(url)
 	fmt.Println(qr)
 

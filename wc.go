@@ -3,9 +3,6 @@ package wc
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -55,12 +52,6 @@ type Message struct {
 	Silent  bool   `json:"silent"`
 }
 
-type encrypted struct {
-	Data string `json:"data"`
-	Hmac string `json:"hmac"`
-	Iv   string `json:"iv"`
-}
-
 type Request struct {
 	Id      uint64        `json:"id"`
 	JsonRPC string        `json:"jsonrpc"`
@@ -95,54 +86,6 @@ type AlgoSignResponse struct {
 	Result [][]byte `json:"result"`
 }
 
-func encrypt(b []byte, key []byte) (encrypted, error) {
-	var r encrypted
-
-	iv := make([]byte, 16)
-	_, err := rand.Read(iv)
-	if err != nil {
-		return r, errors.Wrap(err, "failed to fill iv")
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return r, errors.Wrap(err, "failed to create cipher")
-	}
-
-	padding := block.BlockSize() - len(b)%block.BlockSize()
-	ct := make([]byte, len(b)+padding)
-	copy(ct, b)
-
-	for i := len(b); i < len(b)+padding; i++ {
-		ct[i] = byte(padding)
-	}
-
-	enc := cipher.NewCBCEncrypter(block, iv)
-	enc.CryptBlocks(ct, ct)
-
-	hm := hmac.New(sha256.New, key)
-
-	hmd := make([]byte, len(ct)+len(iv))
-
-	copy(hmd[0:], ct)
-	copy(hmd[len(ct):], iv)
-
-	_, err = hm.Write(hmd)
-	if err != nil {
-		return r, errors.Wrap(err, "failed to write")
-	}
-
-	hmacsha256 := hm.Sum(nil)
-
-	r = encrypted{
-		Data: hex.EncodeToString(ct),
-		Hmac: hex.EncodeToString(hmacsha256),
-		Iv:   hex.EncodeToString(iv),
-	}
-
-	return r, nil
-}
-
 type Client struct {
 	id      uint64
 	methods map[uint64]string
@@ -172,17 +115,6 @@ func WithKey(key []byte) Option {
 	return func(c *Client) {
 		c.key = key
 	}
-}
-
-func MakeKey() ([]byte, error) {
-	key := make([]byte, 32)
-
-	_, err := rand.Read(key)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to make key")
-	}
-
-	return key, nil
 }
 
 func MakeTopic() (string, error) {
@@ -250,7 +182,12 @@ func (c *Client) Send(topic string, req Request) error {
 		fmt.Println("Send:", string(pb))
 	}
 
-	emsg, err := encrypt(pb, c.key)
+	iv, err := MakeIV()
+	if err != nil {
+		return errors.Wrap(err, "failed to make iv")
+	}
+
+	emsg, err := encrypt(pb, c.key, iv)
 	if err != nil {
 		return errors.Wrap(err, "failed to encrypt")
 	}
