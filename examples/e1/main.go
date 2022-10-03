@@ -15,12 +15,7 @@ import (
 )
 
 func run() error {
-	key, err := wc.MakeKey()
-	if err != nil {
-		return errors.Wrap(err, "failed to make key")
-	}
-
-	c, err := wc.Dial("a.bridge.walletconnect.org", key, wc.WithDebug(true))
+	c, err := wc.MakeClient(wc.WithDebug(true))
 	if err != nil {
 		return errors.Wrap(err, "failed to dial")
 	}
@@ -38,13 +33,15 @@ func run() error {
 		return errors.Wrap(err, "failed to request session")
 	}
 
-	qr := tqr.New(url)
-	fmt.Println(qr)
-
 	err = c.Subscribe(topic)
 	if err != nil {
 		return errors.Wrap(err, "failed to subscribe")
 	}
+
+	fmt.Println(url)
+
+	qr := tqr.New(url)
+	fmt.Println(qr)
 
 	ac, err := algod.MakeClient("https://mainnet-api.algonode.cloud", "")
 	if err != nil {

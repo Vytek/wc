@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	mathrand "math/rand"
 	"net/http"
 	"sync/atomic"
 
@@ -18,6 +19,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
+)
+
+var letters = []rune("abcdefghijklmnopqrstuvwxyz")
+
+const (
+	jsonRpc20 = "2.0"
+
+	sessionRequestMethod = "wc_sessionRequest"
+	algoSignTxnMethod    = "algo_signTxn"
 )
 
 type Msg interface{}
@@ -67,13 +77,12 @@ type SessionRequestResponseResult struct {
 }
 
 type Response struct {
-	Id uint64 `json:"id"`
+	Id      uint64 `json:"id"`
+	JsonRPC string `json:"jsonrpc"`
 }
 
 type SessionRequestResponse struct {
-	Id      int                          `json:"id"`
-	JsonRPC string                       `json:"jsonrpc"`
-	Result  SessionRequestResponseResult `json:"result"`
+	Result SessionRequestResponseResult `json:"result"`
 }
 
 type AlgoSignParams struct {
@@ -83,20 +92,14 @@ type AlgoSignParams struct {
 }
 
 type AlgoSignResponse struct {
-	Id      int      `json:"id"`
-	JsonRPC string   `json:"jsonrpc"`
-	Result  [][]byte `json:"result"`
+	Result [][]byte `json:"result"`
 }
 
-func encrypt(v interface{}, key []byte) (encrypted, error) {
+func encrypt(b []byte, key []byte) (encrypted, error) {
 	var r encrypted
-	b, err := json.Marshal(v)
-	if err != nil {
-		return r, errors.Wrap(err, "failed to marhsal")
-	}
 
 	iv := make([]byte, 16)
-	_, err = rand.Read(iv)
+	_, err := rand.Read(iv)
 	if err != nil {
 		return r, errors.Wrap(err, "failed to fill iv")
 	}
@@ -159,6 +162,18 @@ func WithDebug(enabled bool) Option {
 	}
 }
 
+func WithHost(host string) Option {
+	return func(c *Client) {
+		c.host = host
+	}
+}
+
+func WithKey(key []byte) Option {
+	return func(c *Client) {
+		c.key = key
+	}
+}
+
 func MakeKey() ([]byte, error) {
 	key := make([]byte, 32)
 
@@ -174,25 +189,36 @@ func MakeTopic() (string, error) {
 	return uuid.NewString(), nil
 }
 
-func Dial(host string, key []byte, opts ...Option) (*Client, error) {
+func MakeClient(opts ...Option) (*Client, error) {
 	header := make(http.Header)
-
-	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("wss://%s/", host), header)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to dial")
-	}
 
 	c := &Client{
 		methods: make(map[uint64]string),
-
-		host: host,
-		conn: conn,
-		key:  key,
 	}
 
 	for _, opt := range opts {
 		opt(c)
 	}
+
+	if c.host == "" {
+		sub := letters[mathrand.Int()%len(letters)]
+		c.host = fmt.Sprintf("%c.bridge.walletconnect.org", sub)
+	}
+
+	if c.key == nil {
+		key, err := MakeKey()
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to make key")
+		}
+		c.key = key
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("wss://%s/", c.host), header)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to dial")
+	}
+
+	c.conn = conn
 
 	return c, nil
 }
@@ -205,6 +231,45 @@ func (c *Client) Subscribe(topic string) error {
 		Silent:  true,
 	})
 
+	if err != nil {
+		return errors.Wrap(err, "failed to write")
+	}
+
+	return nil
+}
+
+func (c *Client) Send(topic string, req Request) error {
+	c.methods[req.Id] = req.Method
+
+	pb, err := json.Marshal(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to marhsal")
+	}
+
+	if c.debug {
+		fmt.Println("Send:", string(pb))
+	}
+
+	emsg, err := encrypt(pb, c.key)
+	if err != nil {
+		return errors.Wrap(err, "failed to encrypt")
+	}
+
+	cb, err := json.Marshal(emsg)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal")
+	}
+
+	bs := string(cb)
+
+	msg := Message{
+		Topic:   topic,
+		Type:    "pub",
+		Payload: bs,
+		Silent:  true,
+	}
+
+	err = c.conn.WriteJSON(msg)
 	if err != nil {
 		return errors.Wrap(err, "failed to write")
 	}
@@ -226,85 +291,47 @@ func (c *Client) SendTransactions(peer string, txns []types.Transaction) error {
 
 	req := Request{
 		Id:      atomic.AddUint64(&c.id, 1),
-		JsonRPC: "2.0",
-		Method:  "algo_signTxn",
+		JsonRPC: jsonRpc20,
+		Method:  algoSignTxnMethod,
 		Params:  []interface{}{params},
 	}
 
-	c.methods[req.Id] = req.Method
-
-	emsg, err := encrypt(req, c.key)
+	err := c.Send(peer, req)
 	if err != nil {
-		return errors.Wrap(err, "failed to encrypt")
-	}
-
-	b, err := json.Marshal(emsg)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal")
-	}
-
-	bs := string(b)
-
-	msg := Message{
-		Topic:   peer,
-		Type:    "pub",
-		Payload: bs,
-		Silent:  true,
-	}
-
-	err = c.conn.WriteJSON(msg)
-	if err != nil {
-		return errors.Wrap(err, "failed to write")
+		return errors.Wrap(err, "failed to write algo_signTxn")
 	}
 
 	return nil
 }
 
-func (c *Client) RequestSession(topic string, meta SessionRequestPeerMeta) (string, error) {
+func (c *Client) RequestSession(peer string, meta SessionRequestPeerMeta) (string, error) {
 	req := Request{
 		Id:      atomic.AddUint64(&c.id, 1),
-		JsonRPC: "2.0",
-		Method:  "wc_sessionRequest",
+		JsonRPC: jsonRpc20,
+		Method:  sessionRequestMethod,
 		Params: []interface{}{
 			SessionRequestParams{
-				PeerId:   topic,
+				PeerId:   peer,
 				PeerMeta: meta,
 				ChainId:  4160,
 			},
 		},
 	}
 
-	c.methods[req.Id] = req.Method
+	topic := uuid.New().String()
 
-	emsg, err := encrypt(req, c.key)
+	err := c.Send(topic, req)
 	if err != nil {
-		return "", errors.Wrap(err, "failed to encrypt")
-	}
-
-	b, err := json.Marshal(emsg)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to marshal")
-	}
-
-	bs := string(b)
-
-	pubTopic := uuid.New().String()
-
-	msg := Message{
-		Topic:   pubTopic,
-		Type:    "pub",
-		Payload: bs,
-		Silent:  true,
-	}
-
-	err = c.conn.WriteJSON(msg)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to write")
+		return "", errors.Wrap(err, "failed to send request session")
 	}
 
 	keyString := hex.EncodeToString(c.key)
 
-	url := fmt.Sprintf("wc:%s@1?bridge=https%%3A%%2F%%2F%s&key=%s", pubTopic, c.host, keyString)
+	url := fmt.Sprintf("wc:%s@1?bridge=https%%3A%%2F%%2F%s&key=%s", topic, c.host, keyString)
+
+	if c.debug {
+		fmt.Println("URL:", url)
+	}
 
 	return url, nil
 }
@@ -364,6 +391,10 @@ func (c *Client) Read() (Msg, error) {
 		return nil, errors.Wrap(err, "failed to unmarshal response")
 	}
 
+	if resp.JsonRPC != jsonRpc20 {
+		return nil, errors.New("unexpected jsonrpc version")
+	}
+
 	method := c.methods[resp.Id]
 	delete(c.methods, resp.Id)
 
@@ -372,7 +403,7 @@ func (c *Client) Read() (Msg, error) {
 	}
 
 	switch method {
-	case "wc_sessionRequest":
+	case sessionRequestMethod:
 		var resp SessionRequestResponse
 
 		err = json.Unmarshal(pt, &resp)
@@ -381,7 +412,7 @@ func (c *Client) Read() (Msg, error) {
 		}
 
 		return resp, nil
-	case "algo_signTxn":
+	case algoSignTxnMethod:
 		var resp AlgoSignResponse
 
 		err = json.Unmarshal(pt, &resp)
