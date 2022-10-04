@@ -1,3 +1,4 @@
+![tests](https://github.com/dragmz/wc/actions/workflows/go.yml/badge.svg)
 ### Example
 
 `> go run examples/e1/main.go`
