@@ -9,7 +9,7 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"net/http"
-	"sync/atomic"
+	"time"
 
 	"github.com/algorand/go-algorand-sdk/encoding/msgpack"
 	"github.com/algorand/go-algorand-sdk/types"
@@ -52,11 +52,27 @@ type Message struct {
 	Silent  bool   `json:"silent"`
 }
 
+type RequestHeader struct {
+	Id      uint64 `json:"id"`
+	JsonRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+}
+
+type SessionUpdateParams struct {
+	Approved  bool     `json:"approved"`
+	ChainId   int      `json:"chainId"`
+	NetworkId int      `json:"networkId"`
+	Accounts  []string `json:"accounts"`
+}
+
+type SessionUpdateRequest struct {
+	RequestHeader
+	Params []SessionUpdateParams `json:"params"`
+}
+
 type Request struct {
-	Id      uint64        `json:"id"`
-	JsonRPC string        `json:"jsonrpc"`
-	Method  string        `json:"method"`
-	Params  []interface{} `json:"params"`
+	RequestHeader
+	Params []interface{} `json:"params"`
 }
 
 type SessionRequestResponseResult struct {
@@ -67,9 +83,14 @@ type SessionRequestResponseResult struct {
 	Accounts []string               `json:"accounts"`
 }
 
-type Response struct {
+type ResponseHeader struct {
 	Id      uint64 `json:"id"`
 	JsonRPC string `json:"jsonrpc"`
+}
+
+type Response struct {
+	ResponseHeader
+	Result []byte
 }
 
 type SessionRequestResponse struct {
@@ -81,14 +102,18 @@ type AlgoSignParams struct {
 	Message   string   `json:"message"`
 	Signers   []string `json:"signers,omitempty"`
 }
+type Error struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
 
 type AlgoSignResponse struct {
+	Error  *Error   `json:"error"`
 	Result [][]byte `json:"result"`
 }
 
 type Client struct {
-	id      uint64
-	methods map[uint64]string
+	id uint64
 
 	host string
 	conn *websocket.Conn
@@ -124,15 +149,15 @@ func MakeTopic() (string, error) {
 func MakeClient(opts ...Option) (*Client, error) {
 	header := make(http.Header)
 
-	c := &Client{
-		methods: make(map[uint64]string),
-	}
+	c := &Client{}
 
 	for _, opt := range opts {
 		opt(c)
 	}
 
 	if c.host == "" {
+		mathrand.Seed(time.Now().UnixNano())
+
 		sub := letters[mathrand.Int()%len(letters)]
 		c.host = fmt.Sprintf("%c.bridge.walletconnect.org", sub)
 	}
@@ -155,6 +180,49 @@ func MakeClient(opts ...Option) (*Client, error) {
 	return c, nil
 }
 
+func MakeSendTransactions(id uint64, txns []types.Transaction) (Request, error) {
+	params := make([]interface{}, len(txns))
+
+	for i, txn := range txns {
+		encoded := msgpack.Encode(txn)
+
+		params[i] = AlgoSignParams{
+			TxnBase64: base64.StdEncoding.EncodeToString(encoded),
+			Message:   string(txn.Note),
+		}
+	}
+
+	req := Request{
+		RequestHeader: MakeHeader(id, algoSignTxnMethod),
+		Params:        []interface{}{params},
+	}
+
+	return req, nil
+}
+
+func MakeHeader(id uint64, method string) RequestHeader {
+	return RequestHeader{
+		Id:      id,
+		JsonRPC: jsonRpc20,
+		Method:  method,
+	}
+}
+
+func MakeRequestSession(id uint64, peer string, meta SessionRequestPeerMeta) (Request, error) {
+	req := Request{
+		RequestHeader: MakeHeader(id, sessionRequestMethod),
+		Params: []interface{}{
+			SessionRequestParams{
+				PeerId:   peer,
+				PeerMeta: meta,
+				ChainId:  4160,
+			},
+		},
+	}
+
+	return req, nil
+}
+
 func (c *Client) Subscribe(topic string) error {
 	err := c.conn.WriteJSON(Message{
 		Topic:   topic,
@@ -171,8 +239,6 @@ func (c *Client) Subscribe(topic string) error {
 }
 
 func (c *Client) Send(topic string, req Request) error {
-	c.methods[req.Id] = req.Method
-
 	pb, err := json.Marshal(req)
 	if err != nil {
 		return errors.Wrap(err, "failed to marhsal")
@@ -214,151 +280,79 @@ func (c *Client) Send(topic string, req Request) error {
 	return nil
 }
 
-func (c *Client) SendTransactions(peer string, txns []types.Transaction) error {
-	params := make([]interface{}, len(txns))
-
-	for i, txn := range txns {
-		encoded := msgpack.Encode(txn)
-
-		params[i] = AlgoSignParams{
-			TxnBase64: base64.StdEncoding.EncodeToString(encoded),
-			Message:   string(txn.Note),
-		}
-	}
-
-	req := Request{
-		Id:      atomic.AddUint64(&c.id, 1),
-		JsonRPC: jsonRpc20,
-		Method:  algoSignTxnMethod,
-		Params:  []interface{}{params},
-	}
-
-	err := c.Send(peer, req)
-	if err != nil {
-		return errors.Wrap(err, "failed to write algo_signTxn")
-	}
-
-	return nil
-}
-
-func (c *Client) RequestSession(peer string, meta SessionRequestPeerMeta) (string, error) {
-	req := Request{
-		Id:      atomic.AddUint64(&c.id, 1),
-		JsonRPC: jsonRpc20,
-		Method:  sessionRequestMethod,
-		Params: []interface{}{
-			SessionRequestParams{
-				PeerId:   peer,
-				PeerMeta: meta,
-				ChainId:  4160,
-			},
-		},
-	}
-
-	topic := uuid.New().String()
-
-	err := c.Send(topic, req)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to send request session")
-	}
-
+func (c *Client) MakeUrl(topic string) string {
 	keyString := hex.EncodeToString(c.key)
 
 	url := fmt.Sprintf("wc:%s@1?bridge=https%%3A%%2F%%2F%s&key=%s", topic, c.host, keyString)
 
-	if c.debug {
-		fmt.Println("URL:", url)
-	}
-
-	return url, nil
+	return url
 }
 
-func (c *Client) Read() (Msg, error) {
+func (c *Client) Read() (Response, error) {
 	_, p, err := c.conn.ReadMessage()
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to read message")
+		return Response{}, errors.Wrap(err, "failed to read message")
 	}
 
 	var m Message
 	err = json.Unmarshal(p, &m)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal")
+		return Response{}, errors.Wrap(err, "failed to unmarshal")
 	}
 
 	block, err := aes.NewCipher(c.key)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create cipher")
+		return Response{}, errors.Wrap(err, "failed to create cipher")
 	}
 
 	var e encrypted
 
 	err = json.Unmarshal([]byte(m.Payload), &e)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal")
+		return Response{}, errors.Wrap(err, "failed to unmarshal")
 	}
 
 	iv, err := hex.DecodeString(e.Iv)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to decode")
+		return Response{}, errors.Wrap(err, "failed to decode")
 	}
 
 	dec := cipher.NewCBCDecrypter(block, iv)
 
 	ct, err := hex.DecodeString(e.Data)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to decode")
+		return Response{}, errors.Wrap(err, "failed to decode")
 	}
 
 	dec.CryptBlocks(ct, ct)
 
-	var pt []byte
+	var pb []byte
 	if len(ct) > 0 {
 		paddingSize := int(ct[len(ct)-1])
-		pt = ct[0 : len(ct)-paddingSize]
+		pb = ct[0 : len(ct)-paddingSize]
 	}
 
-	var resp Response
+	var head ResponseHeader
 
 	if c.debug {
-		fmt.Println(string(pt))
+		fmt.Println(string(pb))
 	}
 
-	err = json.Unmarshal(pt, &resp)
+	err = json.Unmarshal(pb, &head)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal response")
+		return Response{}, errors.Wrap(err, "failed to unmarshal response")
 	}
 
-	if resp.JsonRPC != jsonRpc20 {
-		return nil, errors.New("unexpected jsonrpc version")
+	if head.JsonRPC != jsonRpc20 {
+		return Response{}, errors.New("unexpected jsonrpc version")
 	}
-
-	method := c.methods[resp.Id]
-	delete(c.methods, resp.Id)
 
 	if c.debug {
-		fmt.Println("Id:", resp.Id, "| Method:", method)
+		fmt.Println("Id:", head.Id)
 	}
 
-	switch method {
-	case sessionRequestMethod:
-		var resp SessionRequestResponse
-
-		err = json.Unmarshal(pt, &resp)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to unmarshal wc_sessionRequest response")
-		}
-
-		return resp, nil
-	case algoSignTxnMethod:
-		var resp AlgoSignResponse
-
-		err = json.Unmarshal(pt, &resp)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to unmarshal algo_signTxn response")
-		}
-
-		return resp, nil
-	}
-
-	return resp, nil
+	return Response{
+		ResponseHeader: head,
+		Result:         pb,
+	}, nil
 }
