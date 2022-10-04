@@ -81,7 +81,7 @@ func run(a args) error {
 		accounts = resp.Result.Accounts
 
 		for {
-			if accounts == nil || len(accounts) == 0 {
+			if len(accounts) == 0 {
 				fmt.Println("Session closed.")
 				return nil
 			}
