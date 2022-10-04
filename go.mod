@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/algorand/go-algorand-sdk v1.21.0
-	github.com/dragmz/tqr v0.0.0-20221003201933-91b0f5e92092
+	github.com/dragmz/tqr v0.0.0-20221004190313-3e8bf2533da1
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/websocket v1.5.0
 	github.com/pkg/errors v0.9.1

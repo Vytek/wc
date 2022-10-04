@@ -3,8 +3,8 @@ github.com/algorand/go-algorand-sdk v1.21.0/go.mod h1:7i2peZBcE48kfoxNZnLA+mklKh
 github.com/algorand/go-codec/codec v1.1.9 h1:el4HFSPZhP+YCgOZxeFGB/BqlNkaUIs55xcALulUTCM=
 github.com/algorand/go-codec/codec v1.1.9/go.mod h1:YkEx5nmr/zuCeaDYOIhlDg92Lxju8tj2d2NrYqP7g7k=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
-github.com/dragmz/tqr v0.0.0-20221003201933-91b0f5e92092 h1:a6mNMFfRUA6u5AbNGa6LM2nbBaosagu8CaLPb93G66o=
-github.com/dragmz/tqr v0.0.0-20221003201933-91b0f5e92092/go.mod h1:FKXIBnAbEP/dAkFHlEw1T1OtTErWQNsOUkgtbxXesCw=
+github.com/dragmz/tqr v0.0.0-20221004190313-3e8bf2533da1 h1:vILl+I6L10XFm/luGOh7+5sED8J2Qw9rQS//aTek9TU=
+github.com/dragmz/tqr v0.0.0-20221004190313-3e8bf2533da1/go.mod h1:FKXIBnAbEP/dAkFHlEw1T1OtTErWQNsOUkgtbxXesCw=
 github.com/google/go-cmp v0.5.2 h1:X2ev0eStA3AbceY54o37/0PQ/UWqKEiiO2dKL5OPaFM=
 github.com/google/go-cmp v0.5.2/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
 github.com/google/go-querystring v1.1.0 h1:AnCroh3fv4ZBgVIf1Iwtovgjaw/GiKJo8M8yD/fhyJ8=
